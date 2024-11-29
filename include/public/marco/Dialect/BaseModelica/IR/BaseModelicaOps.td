@@ -899,6 +899,7 @@ def BaseModelica_StoreOp : BaseModelica_Op<"store",
     let results = (outs);
     let hasCustomAssemblyFormat = 1;
     let hasVerifier = 1;
+    let hasCanonicalizer = 1;
 
     let extraClassDeclaration = [{
         /// Get the array type.
