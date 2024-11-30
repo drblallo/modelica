@@ -289,6 +289,24 @@ def ViewAccessFoldingPass : Pass<"fold-view-accesses", "mlir::ModuleOp">
 // Optimizations
 //===---------------------------------------------------------------------===//
 
+def EquationFunctionAffineRaisePass
+    : Pass<"equation-affine-raise", "mlir::func::FuncOp">
+{
+    let summary = "Raise equation functions to affine representation";
+
+    let description = [{
+        Traverse the affine loops inside the equation function and convert the
+        `memref.load` and `memref.store` operations into `affine.load` and
+        `affine.store` ones.
+    }];
+
+    let dependentDialects = [
+        "mlir::affine::AffineDialect"
+    ];
+
+    let constructor = "mlir::bmodelica::createEquationFunctionAffineRaisePass()";
+}
+
 def EquationFunctionLoopHoistingPass
     : Pass<"equation-function-loop-hoist", "EquationFunctionOp">
 {
