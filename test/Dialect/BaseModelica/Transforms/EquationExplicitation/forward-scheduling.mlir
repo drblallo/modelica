@@ -1,5 +1,7 @@
 // RUN: modelica-opt %s --split-input-file --equation-explicitation | FileCheck %s
 
+// CHECK: #[[map:.*]] = affine_map<(d0) -> (d0)>
+
 // CHECK:       bmodelica.schedule @schedule {
 // CHECK-NEXT:      bmodelica.dynamic {
 // CHECK-NEXT:          bmodelica.schedule_block writtenVariables = [<@x, {[1,9]}>], readVariables = [<@x, {[0,8]}>] {
@@ -9,10 +11,9 @@
 // CHECK-NEXT:  }
 
 // CHECK:       bmodelica.equation_function @[[eq]](%[[lb:.*]]: index, %[[ub:.*]]: index) {
-// CHECK:           %[[step:.*]] = arith.constant 1 : index
-// CHECK:           scf.for %[[i0:.*]] = %[[lb]] to %[[ub]] step %[[step]] {
-// CHECK:               %[[one:.*]] = arith.constant 1 : index
-// CHECK:               %[[i0_remapped:.*]] = arith.addi %[[one]], %[[i0]]
+// CHECK:           affine.for %[[i0:.*]] = #[[map]](%[[lb]]) to #[[map]](%[[ub]]) {
+// CHECK:               %[[one:.*]] = bmodelica.constant 1 : index
+// CHECK:               %[[i0_remapped:.*]] = bmodelica.add %[[one]], %[[i0]]
 // CHECK:               %[[sub:.*]] = bmodelica.sub %[[i0_remapped]], %{{.*}}
 // CHECK:               %[[var:.*]] = bmodelica.qualified_variable_get @Test::@x
 // CHECK:               %[[subscription:.*]] = bmodelica.subscription %[[var]][%[[i0_remapped]]]
