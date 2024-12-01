@@ -1,4 +1,5 @@
 set(SOURCES
+    CodegenOptions.cpp
     CompilerInstance.cpp
     CompilerInvocation.cpp
     DiagnosticHandler.cpp

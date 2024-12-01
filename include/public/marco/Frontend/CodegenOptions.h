@@ -12,6 +12,8 @@ namespace marco::frontend {
 /// The class extends the language options for C / C++ to enable the
 /// integration with clang's diagnostics infrastructure.
 struct CodegenOptions : public clang::CodeGenOptions {
+  CodegenOptions();
+
   llvm::OptimizationLevel optLevel = llvm::OptimizationLevel::O0;
 
   bool debug = true;
@@ -31,11 +33,15 @@ struct CodegenOptions : public clang::CodeGenOptions {
   bool singleValuedInductionElimination = false;
   bool loopFusion = false;
   bool loopTiling = false;
+  bool vectorization = false;
+  llvm::SmallVector<int64_t, 3> vectorSizes;
 
   unsigned int bitWidth = 64;
 
   std::string cpu = "generic";
   std::vector<std::string> features;
+
+  bool hasFeature(llvm::StringRef feature) const;
 };
 } // namespace marco::frontend
 
