@@ -307,6 +307,29 @@ def EquationFunctionAffineRaisePass
     let constructor = "mlir::bmodelica::createEquationFunctionAffineRaisePass()";
 }
 
+def EquationFunctionPeelingPass
+    : Pass<"equation-peeling", "mlir::func::FuncOp">
+{
+    let summary = "Peel the equations loops";
+
+    let description = [{
+        Split each loop in equation functions so that the main loop has an
+        iteration range that is a multiple of a given factor.
+    }];
+
+    let dependentDialects = [
+        "mlir::affine::AffineDialect",
+        "mlir::scf::SCFDialect"
+    ];
+
+    let options = [
+        ListOption<"widthFactors", "width-factors", "int64_t",
+                   "Width factors for the iteration ranges.">,
+    ];
+
+    let constructor = "mlir::bmodelica::createEquationFunctionPeelingPass()";
+}
+
 def EquationFunctionLoopHoistingPass
     : Pass<"equation-function-loop-hoist", "EquationFunctionOp">
 {

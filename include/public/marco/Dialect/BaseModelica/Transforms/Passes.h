@@ -12,6 +12,7 @@
 #include "marco/Dialect/BaseModelica/Transforms/EquationExplicitationTest.h"
 #include "marco/Dialect/BaseModelica/Transforms/EquationFunctionAffineRaise.h"
 #include "marco/Dialect/BaseModelica/Transforms/EquationFunctionLoopHoisting.h"
+#include "marco/Dialect/BaseModelica/Transforms/EquationFunctionPeeling.h"
 #include "marco/Dialect/BaseModelica/Transforms/EquationInductionsExplicitation.h"
 #include "marco/Dialect/BaseModelica/Transforms/EquationSidesSplit.h"
 #include "marco/Dialect/BaseModelica/Transforms/EquationTemplatesCreation.h"
