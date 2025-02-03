@@ -422,6 +422,25 @@ def VariablesPruningPass : Pass<"variables-pruning", "mlir::ModuleOp">
     let constructor = "mlir::bmodelica::createVariablesPruningPass()";
 }
 
+def ResultRematerializationPass : Pass<"result-rematerialization", "mlir::ModuleOp">
+{
+    let summary  = "Recompute results when their operands are likely to reside in cache.";
+
+    let description = [{
+      Recompute results when their operands are likely to reside in cache.
+
+      TBD: This is done by building a graph to balance proximity and equation node degrees.
+      TODO(Tor): Improve the description
+    }];
+
+    let dependentDialects = [
+      "mlir::bmodelica::BaseModelicaDialect"
+    ];
+
+
+    let constructor = "mlir::bmodelica::createResultRematerializationPass()";
+}
+
 //===---------------------------------------------------------------------===//
 // Model solving
 //===---------------------------------------------------------------------===//

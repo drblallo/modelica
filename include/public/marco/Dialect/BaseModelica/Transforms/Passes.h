@@ -33,6 +33,7 @@
 #include "marco/Dialect/BaseModelica/Transforms/ReadOnlyVariablesPropagation.h"
 #include "marco/Dialect/BaseModelica/Transforms/RecordInlining.h"
 #include "marco/Dialect/BaseModelica/Transforms/RungeKutta.h"
+#include "marco/Dialect/BaseModelica/Transforms/ResultRematerialization.h"
 #include "marco/Dialect/BaseModelica/Transforms/SCCAbsenceVerification.h"
 #include "marco/Dialect/BaseModelica/Transforms/SCCDetection.h"
 #include "marco/Dialect/BaseModelica/Transforms/SCCSolvingBySubstitution.h"
