@@ -10,7 +10,6 @@ namespace mlir::bmodelica {
 
 using namespace ::mlir::bmodelica;
 
-
 namespace {
 class ResultRematerializationPass
     : public impl::ResultRematerializationPassBase<
@@ -23,27 +22,32 @@ public:
   void runOnOperation() override;
 
 private:
+  mlir::LogicalResult
+  handleModel(ModelOp modelOp,
+              mlir::SymbolTableCollection &symbolTableCollection);
 
-  mlir::LogicalResult handleModel(ModelOp modelOp,
-                                  mlir::SymbolTableCollection &symbolTableCollection);
-
-  llvm::SmallVector<VariableOp> collectVariables(ModelOp modelOp,
-                                  mlir::SymbolTableCollection &symTables)
-  {
+  llvm::SmallVector<VariableOp>
+  collectVariables(ModelOp modelOp, mlir::SymbolTableCollection &symTables) {
     llvm::SmallVector<VariableOp> result{};
 
-    for ( VariableOp var : modelOp.getVariables() ) {
-        result.push_back(var);
-        llvm::dbgs() << "Found variable " << var.getName() << "\n";
+    for (VariableOp var : modelOp.getVariables()) {
+      result.push_back(var);
+      llvm::dbgs() << "Found variable " << var.getName() << "\n";
     }
 
     return result;
   }
 
-llvm::SmallVector<std::pair<VariableOp, VariableOp>>
-getVariablePairs(ModelOp modelOp, llvm::SmallVector<VariableOp> &variableOps, mlir::SymbolTableCollection &symbolTableCollection, const DerivativesMap &derivativesMap) ;
+  //============================================================
+  // Utility functions
+  //============================================================
+  llvm::SmallVector<ScheduleOp> getSchedules(ModelOp modelOp);
+  llvm::SmallVector<ScheduleBlockOp> getScheduleBlocks(ScheduleOp scheduleOp);
 
-
+  llvm::SmallVector<std::pair<VariableOp, VariableOp>>
+  getVariablePairs(ModelOp modelOp, llvm::SmallVector<VariableOp> &variableOps,
+                   mlir::SymbolTableCollection &symbolTableCollection,
+                   const DerivativesMap &derivativesMap);
 };
 } // namespace
 
@@ -65,16 +69,22 @@ void ResultRematerializationPass::runOnOperation() {
   for (ModelOp modelOp : modelOps) {
     auto res = handleModel(modelOp, symTables);
 
-    if ( res.failed() ) {
+    if (res.failed()) {
       return signalPassFailure();
     }
   }
 }
 
+struct RMScheduleBlockNode {
+  ScheduleOp parentScheduleOp;
+  ScheduleBlockOp scheduleBlockOp;
+
+  llvm::SmallVector<Variable> reads;
+  llvm::SmallVector<Variable> writes;
+};
 
 mlir::LogicalResult ResultRematerializationPass::handleModel(
-    ModelOp modelOp, mlir::SymbolTableCollection &symbolTableCollection)
-{
+    ModelOp modelOp, mlir::SymbolTableCollection &symbolTableCollection) {
   llvm::dbgs() << "Handling model: " << modelOp.getName() << "\n";
 
   // Get all model variables
@@ -82,49 +92,51 @@ mlir::LogicalResult ResultRematerializationPass::handleModel(
 
   // Get state variables and their derivatives
   const DerivativesMap &derivativesMap = modelOp.getProperties().derivativesMap;
-  auto variablePairs = getVariablePairs(modelOp, variableOps, symbolTableCollection, derivativesMap);
+  auto variablePairs = getVariablePairs(modelOp, variableOps,
+                                        symbolTableCollection, derivativesMap);
 
-  // Get the schedules
-  llvm::SmallVector<ScheduleOp> scheduleOps{};
+  llvm::DenseMap<llvm::StringRef, std::deque<RMScheduleBlockNode>>
+      scheduleGraphs;
 
+  auto scheduleOps = getSchedules(modelOp);
 
-  modelOp.walk([&] (mlir::Operation *op) {
-    if ( ScheduleOp scheduleOp = mlir::dyn_cast<ScheduleOp>(op) ) {
-      // TODO: Remove this condition or refine it
-      if ( scheduleOp.getName() == "dynamic" ) {
-        scheduleOps.push_back(scheduleOp);
-      }
-    }
-  });
+  for (ScheduleOp scheduleOp : scheduleOps) {
 
-  for ( ScheduleOp scheduleOp : scheduleOps ) {
+    std::deque<RMScheduleBlockNode> list;
     llvm::dbgs() << "Handling schedule " << scheduleOp.getName() << "\n";
 
-    llvm::SmallVector<ScheduleBlockOp> scheduleBlockOps{};
+    auto scheduleBlockOps = getScheduleBlocks(scheduleOp);
 
-    scheduleOp.walk([&] (mlir::Operation *op) {
-      if ( ScheduleBlockOp scheduleBlockOp = mlir::dyn_cast<ScheduleBlockOp>(op) ) {
-        scheduleBlockOps.push_back(scheduleBlockOp);
-      }
-    });
+    for (ScheduleBlockOp scheduleBlockOp : scheduleBlockOps) {
+      VariablesList writes =
+          scheduleBlockOp.getProperties().getWrittenVariables();
 
-    for ( ScheduleBlockOp scheduleBlockOp : scheduleBlockOps ) {
-      VariablesList list = scheduleBlockOp.getProperties().getWrittenVariables();
+      RMScheduleBlockNode node{};
 
-
-    llvm::dbgs() << "For schedule : " << scheduleOp.getName() << "\n";
-      for ( auto x : list ) {
-        llvm::dbgs() << "Written variable: " << x.name << "\n";
+      for (const auto &write : writes) {
+        node.writes.push_back(write);
       }
 
-      for ( auto x : scheduleBlockOp.getProperties().getReadVariables() ) {
-        llvm::dbgs() << "Read variable: " << x.name << "\n";
+      for (const auto &read :
+           scheduleBlockOp.getProperties().getReadVariables()) {
+        node.reads.push_back(read);
       }
 
+      node.parentScheduleOp = scheduleOp;
+      node.scheduleBlockOp = scheduleBlockOp;
 
+      list.emplace_back(std::move(node));
     }
 
+    scheduleGraphs[scheduleOp.getName()] = std::move(list);
+  }
 
+  for (auto &[name, list] : scheduleGraphs) {
+    llvm::dbgs() << "For schedule " << name << "\n";
+
+    for (const RMScheduleBlockNode &node : list) {
+      node.scheduleBlockOp->dump();
+    }
   }
 
   return mlir::success();
@@ -152,6 +164,36 @@ ResultRematerializationPass::getVariablePairs(
   return result;
 }
 
+llvm::SmallVector<ScheduleOp>
+ResultRematerializationPass::getSchedules(ModelOp modelOp) {
+  // Get the schedules
+  llvm::SmallVector<ScheduleOp> result{};
+
+  modelOp.walk([&](mlir::Operation *op) {
+    if (ScheduleOp scheduleOp = mlir::dyn_cast<ScheduleOp>(op)) {
+      // TODO: Remove this condition or refine it
+      if (scheduleOp.getName() == "dynamic") {
+        result.push_back(scheduleOp);
+      }
+    }
+  });
+
+  return result;
+}
+
+llvm::SmallVector<ScheduleBlockOp>
+ResultRematerializationPass::getScheduleBlocks(ScheduleOp scheduleOp) {
+  // Get the schedules
+  llvm::SmallVector<ScheduleBlockOp> result{};
+
+  scheduleOp.walk([&](mlir::Operation *op) {
+    if (ScheduleBlockOp scheduleBlockOp = mlir::dyn_cast<ScheduleBlockOp>(op)) {
+      result.push_back(scheduleBlockOp);
+    }
+  });
+
+  return result;
+}
 
 namespace mlir::bmodelica {
 std::unique_ptr<mlir::Pass> createResultRematerializationPass() {
