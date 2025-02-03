@@ -829,7 +829,6 @@ void CodeGenAction::buildMLIRLoweringPipeline(mlir::PassManager &pm) {
   // Add additional inductions in case of equalities between arrays.
   pm.addPass(mlir::bmodelica::createEquationInductionsExplicitationPass());
 
-  pm.addPass(mlir::bmodelica::createResultRematerializationPass());
 
   // Fold accesses operating on views.
   pm.addPass(mlir::bmodelica::createViewAccessFoldingPass());
@@ -911,9 +910,16 @@ void CodeGenAction::buildMLIRLoweringPipeline(mlir::PassManager &pm) {
   // Schedule the equations.
   pm.addPass(mlir::bmodelica::createSchedulingPass());
 
+
   // Explicitate the equations.
   pm.addPass(mlir::bmodelica::createEquationExplicitationPass());
 
+  if ( ci.getCodeGenOptions().resultRematerialization ) {
+    // Perform experimental memory balancing optimization
+    //   recomputes results when operands are estimated likely to
+    //   reside in caches.
+    pm.addPass(mlir::bmodelica::createResultRematerializationPass());
+  }
 
   // Lift loop-independent code from loops of equations.
   pm.addNestedPass<mlir::bmodelica::EquationFunctionOp>(

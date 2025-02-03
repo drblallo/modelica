@@ -32,6 +32,10 @@ struct CodegenOptions : public clang::CodeGenOptions {
   bool loopFusion = false;
   bool loopTiling = false;
 
+  // TODO(Tor): Default this to false
+  // TODO(Tor): Add this option to the clang driver in MARCO's customized clang.
+  bool resultRematerialization = true;
+
   unsigned int bitWidth = 64;
 
   std::string cpu = "generic";
