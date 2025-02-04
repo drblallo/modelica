@@ -1,8 +1,9 @@
 #include "marco/Dialect/BaseModelica/IR/BaseModelica.h"
 #include "marco/Dialect/BaseModelica/IR/DerivativesMap.h"
+#include "marco/Dialect/BaseModelica/IR/Ops.h"
 #include "marco/Dialect/BaseModelica/IR/Properties.h"
-#include "marco/Modeling/Graph.h"
 #include "marco/Dialect/BaseModelica/Transforms/ResultRematerialization.h"
+#include "marco/Modeling/Graph.h"
 #include <deque>
 
 namespace mlir::bmodelica {
@@ -13,9 +14,10 @@ namespace mlir::bmodelica {
 using namespace ::mlir::bmodelica;
 
 namespace {
-struct RMScheduleBlockNode {
+struct EquationWrapper {
   ScheduleOp parentScheduleOp;
   ScheduleBlockOp scheduleBlockOp;
+  EquationFunctionOp equationFunctionOp;
 
   llvm::SmallVector<Variable> reads;
   llvm::SmallVector<Variable> writes;
@@ -31,9 +33,8 @@ class ResultRematerializationPass
     : public ::mlir::bmodelica::impl::ResultRematerializationPassBase<
           ResultRematerializationPass> {
 
-  using GraphType = UndirectedGraph<RMScheduleBlockNode>;
-
 public:
+  using GraphType = UndirectedGraph<EquationWrapper>;
   using ResultRematerializationPassBase<
       ResultRematerializationPass>::ResultRematerializationPassBase;
 
@@ -41,7 +42,7 @@ public:
 
 private:
   mlir::LogicalResult
-  handleModel(ModelOp modelOp,
+  handleModel(mlir::ModuleOp module, ModelOp modelOp,
               mlir::SymbolTableCollection &symbolTableCollection);
 
   llvm::SmallVector<VariableOp>
@@ -67,16 +68,105 @@ private:
                    mlir::SymbolTableCollection &symbolTableCollection,
                    const DerivativesMap &derivativesMap);
 
-  GraphType buildScheduleGraph(ScheduleOp scheduleOp);
+  GraphType
+  buildScheduleGraph(ScheduleOp scheduleOp, mlir::ModuleOp moduleOp,
+                     mlir::SymbolTableCollection &symbolTableCollection);
 
-
-  void walkGraph(GraphType &graph, const std::function<void (GraphType::VertexProperty &)> &);
-
+  void walkGraph(GraphType &graph,
+                 const std::function<void(GraphType::VertexProperty &)> &);
 };
+
+struct GraphToMermaidDumper {
+  using GraphType = ResultRematerializationPass::GraphType;
+  using VertexDescriptor = GraphType::VertexDescriptor;
+
+public:
+  static void dump(GraphType *graph, llvm::raw_ostream &os) {
+    GraphToMermaidDumper dumper(graph);
+    dumper.dumpImpl(os);
+  }
+
+private:
+  GraphType *graph;
+
+  GraphToMermaidDumper(GraphType *graph) : graph{graph} {}
+
+  llvm::DenseMap<VertexDescriptor, std::string> computeMappings() {
+    llvm::DenseMap<VertexDescriptor, std::string> result;
+
+    int idx = 0;
+    for (auto vIt = graph->verticesBegin(); vIt != graph->verticesEnd();
+         vIt++) {
+      std::string identifier = indexToStringIdentifier(idx++);
+      result[*vIt] = identifier;
+    }
+
+    return result;
+  }
+
+  void outputNodes(llvm::raw_ostream &os,
+                   llvm::DenseMap<VertexDescriptor, std::string> &mappings) {
+    for (auto vIt = graph->verticesBegin(); vIt != graph->verticesEnd();
+         vIt++) {
+      std::string identifier = mappings.at(*vIt);
+
+      EquationWrapper &eqWrapper = (**(*vIt).value);
+
+      os << identifier << "(\"";
+
+      bool first = true;
+      for (Variable &write : eqWrapper.writes) {
+        std::string res{};
+        llvm::raw_string_ostream ss{res};
+        write.indices.dump(ss);
+
+        if (!first)
+          os << ", ";
+        first = false;
+        os << write.name << " " << ss.str();
+      }
+
+      os << "\")\n";
+    }
+  }
+
+  void dumpImpl(llvm::raw_ostream &os) {
+
+    auto mappings = computeMappings();
+
+    outputNodes(os, mappings);
+
+    for (auto eIt = graph->edgesBegin(); eIt != graph->edgesEnd(); eIt++) {
+
+      auto fromVertex = (*eIt).from;
+      auto toVertex = (*eIt).to;
+
+      const std::string &identifier = mappings.at(fromVertex);
+      const std::string &toIdentifier = mappings.at(toVertex);
+
+      os << identifier << " --> " << toIdentifier << "\n";
+    }
+  }
+
+  std::string indexToStringIdentifier(int idx) {
+    std::string result;
+    constexpr int base = 26;
+
+    while (idx >= 0) {
+      result = char('A' + (idx % base)) + result;
+      idx = (idx / base) - 1;
+    }
+
+    return result;
+  }
+};
+
 } // namespace
 
 void ResultRematerializationPass::runOnOperation() {
   mlir::ModuleOp moduleOp = getOperation();
+
+  moduleOp.dump();
   mlir::IRRewriter rewriter{&getContext()};
 
   mlir::SymbolTableCollection symTables{};
@@ -91,7 +181,7 @@ void ResultRematerializationPass::runOnOperation() {
   });
 
   for (ModelOp modelOp : modelOps) {
-    auto res = handleModel(modelOp, symTables);
+    auto res = handleModel(moduleOp, modelOp, symTables);
 
     if (res.failed()) {
       return signalPassFailure();
@@ -99,9 +189,9 @@ void ResultRematerializationPass::runOnOperation() {
   }
 }
 
-
 mlir::LogicalResult ResultRematerializationPass::handleModel(
-    ModelOp modelOp, mlir::SymbolTableCollection &symbolTableCollection) {
+    mlir::ModuleOp moduleOp, ModelOp modelOp,
+    mlir::SymbolTableCollection &symbolTableCollection) {
   llvm::dbgs() << "Handling model: " << modelOp.getName() << "\n";
 
   // Get all model variables
@@ -112,26 +202,20 @@ mlir::LogicalResult ResultRematerializationPass::handleModel(
   auto variablePairs = getVariablePairs(modelOp, variableOps,
                                         symbolTableCollection, derivativesMap);
 
-  llvm::DenseMap<llvm::StringRef, marco::modeling::internal::UndirectedGraph<RMScheduleBlockNode>>
-    scheduleGraphs;
+  llvm::DenseMap<llvm::StringRef,
+                 marco::modeling::internal::UndirectedGraph<EquationWrapper>>
+      scheduleGraphs;
 
   auto scheduleOps = getSchedules(modelOp);
 
   for (ScheduleOp scheduleOp : scheduleOps) {
-    scheduleGraphs[scheduleOp.getName()] = buildScheduleGraph(scheduleOp);
+    scheduleGraphs[scheduleOp.getName()] =
+        buildScheduleGraph(scheduleOp, moduleOp, symbolTableCollection);
   }
 
-  for (auto &[name, list] : scheduleGraphs) {
-    llvm::dbgs() << "For schedule " << name << "\n";
-
-
-    auto &graph = scheduleGraphs[name];
-
-
-    walkGraph(graph, [] ( RMScheduleBlockNode &node) {
-      llvm::dbgs() << node.parentScheduleOp.getName() << "\n";
-    });
-
+  for (auto &[name, graph] : scheduleGraphs) {
+    llvm::dbgs() << "--- Graph for " << name << " ---\n";
+    GraphToMermaidDumper::dump(&graph, llvm::dbgs());
   }
 
   return mlir::success();
@@ -191,26 +275,34 @@ ResultRematerializationPass::getScheduleBlocks(ScheduleOp scheduleOp) {
 }
 
 ResultRematerializationPass::GraphType
-ResultRematerializationPass::buildScheduleGraph(ScheduleOp scheduleOp) {
+ResultRematerializationPass::buildScheduleGraph(
+    ScheduleOp scheduleOp, mlir::ModuleOp moduleOp,
+    mlir::SymbolTableCollection &symbolTableCollection) {
 
   using namespace marco::modeling::internal;
 
-  using GraphType = UndirectedGraph<RMScheduleBlockNode>;
+  scheduleOp.dump();
+
+  using GraphType = ResultRematerializationPass::GraphType;
+  using VertexDescriptor = typename GraphType::VertexDescriptor;
 
   GraphType graph;
   llvm::dbgs() << "Handling schedule " << scheduleOp.getName() << "\n";
 
   auto scheduleBlockOps = getScheduleBlocks(scheduleOp);
 
-  bool init = false;
-  GraphType::VertexDescriptor currentVertex{};
+  VertexDescriptor currentVertex{};
+
+  llvm::DenseSet<VertexDescriptor> currentScheduleBlockEquations{};
+  llvm::DenseSet<VertexDescriptor> nextScheduleBlockEquations{};
 
   for (ScheduleBlockOp scheduleBlockOp : scheduleBlockOps) {
     VariablesList writes =
         scheduleBlockOp.getProperties().getWrittenVariables();
 
-    RMScheduleBlockNode node{};
+    EquationWrapper node{};
 
+    // Get the read and written variables
     for (const auto &write : writes) {
       node.writes.push_back(write);
     }
@@ -223,24 +315,49 @@ ResultRematerializationPass::buildScheduleGraph(ScheduleOp scheduleOp) {
     node.parentScheduleOp = scheduleOp;
     node.scheduleBlockOp = scheduleBlockOp;
 
-    GraphType::VertexDescriptor newVertex = graph.addVertex(std::move(node));
+    // Get the callee
+    llvm::SmallVector<EquationCallOp> equationCallOps{};
 
-    if ( ! init ) {
-      init = true;
-    } else {
-      graph.addEdge(currentVertex, newVertex);
+    scheduleBlockOp.walk([&](mlir::Operation *op) {
+      if (EquationCallOp equationCallOp = mlir::dyn_cast<EquationCallOp>(op)) {
+        equationCallOps.push_back(equationCallOp);
+      }
+    });
+
+    for (EquationCallOp equationCallOp : equationCallOps) {
+      llvm::dbgs() << "Callee: " << equationCallOp.getCallee().str() << "\n";
+
+      // Try to get the equation
+
+      mlir::Operation *calleeSym = symbolTableCollection.lookupSymbolIn(
+          moduleOp,
+          mlir::FlatSymbolRefAttr::get(equationCallOp.getCalleeAttr()));
+
+      if (EquationFunctionOp equationFunctionOp =
+              mlir::dyn_cast<EquationFunctionOp>(calleeSym)) {
+
+        node.equationFunctionOp = equationFunctionOp;
+
+        VertexDescriptor newVertex = graph.addVertex(std::move(node));
+        nextScheduleBlockEquations.insert(newVertex);
+
+        for (VertexDescriptor prevBlockVertex : currentScheduleBlockEquations) {
+          graph.addEdge(prevBlockVertex, newVertex);
+        }
+      }
     }
 
-    currentVertex = newVertex;
+    currentScheduleBlockEquations = std::move(nextScheduleBlockEquations);
+    nextScheduleBlockEquations.clear();
   }
 
   return graph;
 }
 
+[[maybe_unused]]
 void ResultRematerializationPass::walkGraph(
     GraphType &graph,
-    const std::function<void (typename GraphType::VertexProperty &)> &callBack)
-{
+    const std::function<void(typename GraphType::VertexProperty &)> &callBack) {
   auto vertex = *graph.verticesBegin();
 
   // BFS, preorder visit
@@ -250,18 +367,18 @@ void ResultRematerializationPass::walkGraph(
   // Ensure single visitation.
   llvm::DenseSet<GraphType::VertexDescriptor> visited;
 
-  while ( ! stack.empty() ) {
+  while (!stack.empty()) {
     vertex = stack.back();
     stack.pop_back();
 
-    if ( visited.contains(vertex) ) {
+    if (visited.contains(vertex)) {
       continue;
     }
 
-    for ( auto eIt = graph.outgoingEdgesBegin(vertex); eIt != graph.outgoingEdgesEnd(vertex); eIt++ )
-    {
+    for (auto eIt = graph.outgoingEdgesBegin(vertex);
+         eIt != graph.outgoingEdgesEnd(vertex); eIt++) {
       auto target = (*eIt).to;
-      if ( ! visited.contains(target) ) {
+      if (!visited.contains(target)) {
         stack.emplace_back(target);
       }
     }

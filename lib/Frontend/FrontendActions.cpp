@@ -911,6 +911,7 @@ void CodeGenAction::buildMLIRLoweringPipeline(mlir::PassManager &pm) {
   pm.addPass(mlir::bmodelica::createSchedulingPass());
 
 
+
   // Explicitate the equations.
   pm.addPass(mlir::bmodelica::createEquationExplicitationPass());
 
