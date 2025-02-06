@@ -76,20 +76,84 @@ private:
                  const std::function<void(GraphType::VertexProperty &)> &);
 };
 
-struct GraphToMermaidDumper {
-  using GraphType = ResultRematerializationPass::GraphType;
-  using VertexDescriptor = GraphType::VertexDescriptor;
+template <class GraphType, class VPrinter, class EPrinter>
+struct GraphDumperImpl {
+  // using Traits = typename GraphType::Traits;
+  using VertexDescriptor = typename GraphType::VertexDescriptor;
+  using EdgeDescriptor = typename GraphType::EdgeDescriptor;
 
-public:
-  static void dump(GraphType *graph, llvm::raw_ostream &os) {
-    GraphToMermaidDumper dumper(graph);
-    dumper.dumpImpl(os);
-  }
+  using VertexProperty = typename GraphType::VertexProperty;
+  using EdgeProperty = typename GraphType::EdgeProperty;
+
+  using VertexPrinter =
+      std::function<void(VertexProperty &, llvm::raw_ostream &)>;
+  using EdgePrinter = std::function<void(EdgeProperty &, llvm::raw_ostream &)>;
 
 private:
-  GraphType *graph;
+  GraphDumperImpl(GraphType *graph) : graph{graph} {}
 
-  GraphToMermaidDumper(GraphType *graph) : graph{graph} {}
+  void dump(llvm::raw_ostream &os, VPrinter &&vp, EPrinter &&ep) {
+    GraphDumperImpl dumper(graph);
+    dumper.dumpImpl(os, std::forward<VPrinter>(vp), std::forward<EPrinter>(ep));
+  }
+
+  std::string indexToStringIdentifier(int idx) {
+    std::string result;
+    constexpr int base = 26;
+
+    while (idx >= 0) {
+      result = char('A' + (idx % base)) + result;
+      idx = (idx / base) - 1;
+    }
+
+    return result;
+  }
+
+  void dumpImpl(llvm::raw_ostream &os, VPrinter &&vp, EPrinter &&ep) {
+
+    auto mappings = computeMappings();
+
+    outputNodes(os, mappings, std::forward<VPrinter>(vp));
+
+    for (auto eIt = graph->edgesBegin(); eIt != graph->edgesEnd(); eIt++) {
+
+      auto fromVertex = (*eIt).from;
+      auto toVertex = (*eIt).to;
+
+      const std::string &identifier = mappings.at(fromVertex);
+      const std::string &toIdentifier = mappings.at(toVertex);
+
+      os << identifier << " --> " << toIdentifier << "\n";
+    }
+  }
+
+  template <class VPrinterT>
+  void callVertexPrinter(VPrinterT &&vp, VertexProperty &prop,
+                         llvm::raw_ostream &os) {
+
+    if constexpr (!std::is_same_v<VPrinterT, std::nullptr_t>) {
+      os << "(\"";
+      std::forward<VPrinter>(vp)(prop, os);
+      os << "\")";
+    }
+  }
+
+  void outputNodes(llvm::raw_ostream &os,
+                   llvm::DenseMap<VertexDescriptor, std::string> &mappings,
+                   VPrinter &&vp) {
+    for (auto vIt = graph->verticesBegin(); vIt != graph->verticesEnd();
+         vIt++) {
+      std::string identifier = mappings.at(*vIt);
+
+      VertexProperty &prop = (**(*vIt).value);
+
+      os << identifier;
+
+      callVertexPrinter<VPrinter>(std::forward<VPrinter>(vp), prop, os);
+
+      os << "\n";
+    }
+  }
 
   llvm::DenseMap<VertexDescriptor, std::string> computeMappings() {
     llvm::DenseMap<VertexDescriptor, std::string> result;
@@ -104,60 +168,31 @@ private:
     return result;
   }
 
-  void outputNodes(llvm::raw_ostream &os,
-                   llvm::DenseMap<VertexDescriptor, std::string> &mappings) {
-    for (auto vIt = graph->verticesBegin(); vIt != graph->verticesEnd();
-         vIt++) {
-      std::string identifier = mappings.at(*vIt);
+  friend struct GraphDumper;
 
-      EquationWrapper &eqWrapper = (**(*vIt).value);
+private:
+  GraphType *graph;
+};
 
-      os << identifier << "(\"";
+struct GraphDumper {
+  template <class GraphType>
+  static void dump(GraphType *graph, llvm::raw_ostream &os) {
 
-      bool first = true;
-      for (Variable &write : eqWrapper.writes) {
-        std::string res{};
-        llvm::raw_string_ostream ss{res};
-        write.indices.dump(ss);
-
-        if (!first)
-          os << ", ";
-        first = false;
-        os << write.name << " " << ss.str();
-      }
-
-      os << "\")\n";
-    }
+    dump(graph, os, nullptr, nullptr);
   }
 
-  void dumpImpl(llvm::raw_ostream &os) {
-
-    auto mappings = computeMappings();
-
-    outputNodes(os, mappings);
-
-    for (auto eIt = graph->edgesBegin(); eIt != graph->edgesEnd(); eIt++) {
-
-      auto fromVertex = (*eIt).from;
-      auto toVertex = (*eIt).to;
-
-      const std::string &identifier = mappings.at(fromVertex);
-      const std::string &toIdentifier = mappings.at(toVertex);
-
-      os << identifier << " --> " << toIdentifier << "\n";
-    }
+  template <class GraphType, class VPrinter>
+  static void dump(GraphType *graph, llvm::raw_ostream &os,
+                   VPrinter &&vprinter) {
+    dump(graph, os, vprinter, nullptr);
   }
 
-  std::string indexToStringIdentifier(int idx) {
-    std::string result;
-    constexpr int base = 26;
-
-    while (idx >= 0) {
-      result = char('A' + (idx % base)) + result;
-      idx = (idx / base) - 1;
-    }
-
-    return result;
+  template <class GraphType, class VPrinter, class EPrinter>
+  static void dump(GraphType *graph, llvm::raw_ostream &os, VPrinter &&vprinter,
+                   EPrinter &&eprinter) {
+    GraphDumperImpl<GraphType, VPrinter, EPrinter> instance{graph};
+    instance.dump(os, std::forward<VPrinter>(vprinter),
+                  std::forward<EPrinter>(eprinter));
   }
 };
 
@@ -215,7 +250,22 @@ mlir::LogicalResult ResultRematerializationPass::handleModel(
 
   for (auto &[name, graph] : scheduleGraphs) {
     llvm::dbgs() << "--- Graph for " << name << " ---\n";
-    GraphToMermaidDumper::dump(&graph, llvm::dbgs());
+
+    auto vertexPrinter = [](EquationWrapper &eq, llvm::raw_ostream &os) {
+      bool first = true;
+      for (Variable &write : eq.writes) {
+        std::string res{};
+        llvm::raw_string_ostream ss{res};
+        write.indices.dump(ss);
+
+        if (!first)
+          os << ", ";
+        first = false;
+        os << write.name << " " << ss.str();
+      }
+    };
+
+    GraphDumper::dump(&graph, llvm::dbgs(), vertexPrinter, nullptr);
   }
 
   return mlir::success();
@@ -392,6 +442,7 @@ void ResultRematerializationPass::walkGraph(
 namespace mlir::bmodelica {
 std::unique_ptr<mlir::Pass> createResultRematerializationPass() {
   return std::make_unique<ResultRematerializationPass>();
-  {}
+  {
+  }
 }
 } // namespace mlir::bmodelica
