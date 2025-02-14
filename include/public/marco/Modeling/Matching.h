@@ -515,8 +515,12 @@ public:
   bool empty() const { return steps.empty(); }
 
   template <typename... Args>
-  void emplace(Args &&...args) {
+  void emplace_back(Args &&...args) {
     steps.emplace_back(std::make_shared<BFSStep>(std::forward<Args>(args)...));
+  }
+
+  void push_back(std::shared_ptr<BFSStep> step) {
+    steps.push_back(std::move(step));
   }
 
   void clear() { steps.clear(); }
@@ -1353,7 +1357,7 @@ private:
   }
 
   bool matchIteration() {
-    llvm::SmallVector<AugmentingPath, 8> augmentingPaths;
+    std::vector<AugmentingPath> augmentingPaths;
     getAugmentingPaths(augmentingPaths);
 
     if (augmentingPaths.empty()) {
@@ -1367,97 +1371,16 @@ private:
     return true;
   }
 
-  void getAugmentingPaths(llvm::SmallVectorImpl<AugmentingPath> &paths) const {
-    auto sortHeuristic = [](const std::shared_ptr<BFSStep> &first,
-                            const std::shared_ptr<BFSStep> &second) {
-      return first->getCandidates().flatSize() >
-             second->getCandidates().flatSize();
-    };
+  void getAugmentingPaths(std::vector<AugmentingPath> &augmentingPaths) const {
+    // Get the possible augmenting paths.
+    std::vector<std::shared_ptr<BFSStep>> paths = getCandidateAugmentingPaths();
 
-    Frontier frontier;
-
-    // Calculation of the initial frontier
-    auto equations =
-        llvm::make_range(getEquationsBeginIt(), getEquationsEndIt());
-
-    for (VertexDescriptor equationDescriptor : equations) {
-      const Equation &equation = getEquationFromDescriptor(equationDescriptor);
-
-      if (IndexSet unmatchedEquations = equation.getUnmatched();
-          !unmatchedEquations.empty()) {
-        frontier.emplace(graph, equationDescriptor,
-                         std::move(unmatchedEquations));
-      }
-    }
-
-    llvm::sort(frontier, sortHeuristic);
-
-    // Breadth-first search
-    Frontier newFrontier;
-    Frontier foundPaths;
-
-    while (!frontier.empty() && foundPaths.empty()) {
-      for (const auto &step : frontier) {
-        const VertexDescriptor &vertexDescriptor = step->getNode();
-
-        for (EdgeDescriptor edgeDescriptor : llvm::make_range(
-                 edgesBegin(vertexDescriptor), edgesEnd(vertexDescriptor))) {
-          assert(edgeDescriptor.from == vertexDescriptor);
-          VertexDescriptor nextNode = edgeDescriptor.to;
-          const Edge &edge = graph[edgeDescriptor];
-
-          if (isEquation(vertexDescriptor)) {
-            assert(isVariable(nextNode));
-            auto unmatchedMatrix = edge.getUnmatched();
-            auto filteredMatrix =
-                unmatchedMatrix.filterRows(step->getCandidates());
-            internal::LocalMatchingSolutions solutions =
-                internal::solveLocalMatchingProblem(filteredMatrix);
-
-            for (auto solution : solutions) {
-              Variable var = getVariableFromDescriptor(edgeDescriptor.to);
-              auto unmatchedScalarVariables = var.getUnmatched();
-              auto matched = solution.filterColumns(unmatchedScalarVariables);
-
-              if (!matched.empty()) {
-                foundPaths.emplace(graph, step, edgeDescriptor, nextNode,
-                                   matched.flattenRows(), matched);
-              } else {
-                newFrontier.emplace(graph, step, edgeDescriptor, nextNode,
-                                    solution.flattenRows(), solution);
-              }
-            }
-          } else {
-            assert(isEquation(nextNode));
-            auto filteredMatrix =
-                edge.getMatched().filterColumns(step->getCandidates());
-
-            internal::LocalMatchingSolutions solutions =
-                internal::solveLocalMatchingProblem(filteredMatrix);
-
-            for (auto solution : solutions) {
-              newFrontier.emplace(graph, step, edgeDescriptor, nextNode,
-                                  solution.flattenColumns(), solution);
-            }
-          }
-        }
-      }
-
-      // Set the new frontier for the next iteration
-      frontier.clear();
-      frontier.swap(newFrontier);
-
-      llvm::sort(frontier, sortHeuristic);
-    }
-
-    llvm::sort(foundPaths, sortHeuristic);
-
-    // For each traversed node, keep track of the indexes that have already
+    // For each traversed node, keep track of the indices that have already
     // been traversed by some augmenting path. A new candidate path can be
     // accepted only if it does not traverse any of them.
     std::map<VertexDescriptor, IndexSet> visited;
 
-    for (const auto &pathEnd : foundPaths) {
+    for (const std::shared_ptr<BFSStep> &pathEnd : paths) {
       // All the candidate paths consist in at least two nodes by construction
       assert(pathEnd->hasPrevious());
 
@@ -1514,10 +1437,128 @@ private:
       }
 
       if (validPath) {
-        paths.emplace_back(std::move(flows));
+        augmentingPaths.emplace_back(std::move(flows));
 
         for (auto &p : newVisits) {
           visited.insert_or_assign(p.first, p.second);
+        }
+      }
+    }
+  }
+
+  std::vector<std::shared_ptr<BFSStep>> getCandidateAugmentingPaths() const {
+    std::vector<std::shared_ptr<BFSStep>> paths;
+
+    auto sortHeuristic = [](const std::shared_ptr<BFSStep> &first,
+                            const std::shared_ptr<BFSStep> &second) {
+      return first->getCandidates().flatSize() >
+             second->getCandidates().flatSize();
+    };
+
+    Frontier frontier;
+
+    // Computation of the initial frontier.
+    auto equations =
+        llvm::make_range(getEquationsBeginIt(), getEquationsEndIt());
+
+    for (VertexDescriptor equationDescriptor : equations) {
+      const Equation &equation = getEquationFromDescriptor(equationDescriptor);
+
+      if (IndexSet unmatchedEquations = equation.getUnmatched();
+          !unmatchedEquations.empty()) {
+        frontier.emplace_back(graph, equationDescriptor,
+                              std::move(unmatchedEquations));
+      }
+    }
+
+    // Breadth-first search.
+    Frontier newFrontier;
+
+    std::mutex newFrontierMutex;
+    std::mutex pathsMutex;
+
+    while (!frontier.empty() && paths.empty()) {
+      llvm::sort(frontier, sortHeuristic);
+
+      auto stepFn = [&](const std::shared_ptr<BFSStep> &step) {
+        std::vector<std::shared_ptr<BFSStep>> localFrontier;
+        std::vector<std::shared_ptr<BFSStep>> localPaths;
+
+        expandFrontier(step, localFrontier, localPaths);
+
+        if (!localFrontier.empty()) {
+          std::lock_guard<std::mutex> lock(newFrontierMutex);
+
+          for (auto &localStep : localFrontier) {
+            newFrontier.push_back(std::move(localStep));
+          }
+        }
+
+        if (!localPaths.empty()) {
+          std::lock_guard<std::mutex> lock(pathsMutex);
+
+          for (auto &localStep : localPaths) {
+            paths.push_back(std::move(localStep));
+          }
+        }
+      };
+
+      mlir::parallelForEach(getContext(), frontier, stepFn);
+
+      // Set the new frontier for the next iteration.
+      frontier = std::move(newFrontier);
+    }
+
+    llvm::sort(paths, sortHeuristic);
+    return paths;
+  }
+
+  void expandFrontier(const std::shared_ptr<BFSStep> &step,
+                      std::vector<std::shared_ptr<BFSStep>> &newFrontier,
+                      std::vector<std::shared_ptr<BFSStep>> &paths) const {
+    const VertexDescriptor &vertexDescriptor = step->getNode();
+
+    for (EdgeDescriptor edgeDescriptor : llvm::make_range(
+             edgesBegin(vertexDescriptor), edgesEnd(vertexDescriptor))) {
+      assert(edgeDescriptor.from == vertexDescriptor);
+      VertexDescriptor nextNode = edgeDescriptor.to;
+      const Edge &edge = graph[edgeDescriptor];
+
+      if (isEquation(vertexDescriptor)) {
+        assert(isVariable(nextNode));
+        auto unmatchedMatrix = edge.getUnmatched();
+        auto filteredMatrix = unmatchedMatrix.filterRows(step->getCandidates());
+
+        internal::LocalMatchingSolutions solutions =
+            internal::solveLocalMatchingProblem(filteredMatrix);
+
+        for (auto solution : solutions) {
+          Variable var = getVariableFromDescriptor(edgeDescriptor.to);
+          auto unmatchedScalarVariables = var.getUnmatched();
+          auto matched = solution.filterColumns(unmatchedScalarVariables);
+
+          if (!matched.empty()) {
+            paths.push_back(
+                std::make_shared<BFSStep>(graph, step, edgeDescriptor, nextNode,
+                                          matched.flattenRows(), matched));
+          } else {
+            newFrontier.push_back(
+                std::make_shared<BFSStep>(graph, step, edgeDescriptor, nextNode,
+                                          solution.flattenRows(), solution));
+          }
+        }
+      } else {
+        assert(isEquation(nextNode));
+        auto filteredMatrix =
+            edge.getMatched().filterColumns(step->getCandidates());
+
+        internal::LocalMatchingSolutions solutions =
+            internal::solveLocalMatchingProblem(filteredMatrix);
+
+        for (auto solution : solutions) {
+          newFrontier.push_back(
+              std::make_shared<BFSStep>(graph, step, edgeDescriptor, nextNode,
+                                        solution.flattenColumns(), solution));
         }
       }
     }
